@@ -1,4 +1,4 @@
-code_content = '''import os
+import os
 import re
 import sys
 import json
@@ -31,7 +31,7 @@ YTDLP_RELEASE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/y
 
 def download_instagram_direct(url: str, save_dir: str) -> bool:
     """Прямое скачивание фото из Instagram через публичные эндпоинты без необходимости авторизации."""
-    match = re.search(r'instagram\\.com/(?:p|reel)/([A-Za-z0-9_-]+)', url)
+    match = re.search(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)', url)
     if not match:
         return False
     shortcode = match.group(1)
@@ -54,7 +54,7 @@ def download_instagram_direct(url: str, save_dir: str) -> bool:
 
             unique_urls = list(dict.fromkeys(img_urls))
             for idx, img_url in enumerate(unique_urls):
-                clean_url = img_url.replace('&amp;', '&').replace('\\\\u0026', '&')
+                clean_url = img_url.replace('&amp;', '&').replace('\\u0026', '&')
                 img_req = urllib.request.Request(clean_url, headers=headers)
                 suffix = f"_{idx+1}" if len(unique_urls) > 1 else ""
                 out_path = os.path.join(save_dir, f"instagram_{shortcode}{suffix}.jpg")
@@ -264,7 +264,7 @@ class OrionDownloaderApp(ctk.CTk):
                 self.after(0, lambda: self.set_status("Failed to download yt-dlp engine", "#E5534B"))
                 self.after(0, lambda: messagebox.showerror(
                     "Engine Error",
-                    f"Could not download yt-dlp.exe on first launch. Check your internet connection.\\n\\n{e}"
+                    f"Could not download yt-dlp.exe on first launch. Check your internet connection.\n\n{e}"
                 ))
 
     def _restore_ready_status(self):
@@ -421,10 +421,10 @@ class OrionDownloaderApp(ctk.CTk):
                     self.after(0, lambda: self.set_status("Photo post ready to download.", "#4CAF50"))
                 else:
                     self.after(0, lambda: self.set_status("Failed to fetch media info", "#E5534B"))
-                    self.after(0, lambda: messagebox.showerror("Error", f"Could not retrieve info from URL:\\n\\n{err_msg}"))
+                    self.after(0, lambda: messagebox.showerror("Error", f"Could not retrieve info from URL:\n\n{err_msg}"))
         except Exception as e:
             self.after(0, lambda: self.set_status("Failed to fetch media info", "#E5534B"))
-            self.after(0, lambda: messagebox.showerror("Error", f"Could not retrieve info from URL:\\n\\n{e}"))
+            self.after(0, lambda: messagebox.showerror("Error", f"Could not retrieve info from URL:\n\n{e}"))
         finally:
             self.after(0, lambda: self.btn_check.configure(state="normal"))
 
@@ -450,7 +450,7 @@ class OrionDownloaderApp(ctk.CTk):
                 success = download_instagram_direct(url, self.save_dir)
                 if success:
                     self.update_progress_ui(1.0, "Instagram photos downloaded successfully!", "#4CAF50")
-                    self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved directly to:\\n{self.save_dir}"))
+                    self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved directly to:\n{self.save_dir}"))
                     try:
                         os.startfile(self.save_dir)
                     except Exception:
@@ -467,7 +467,7 @@ class OrionDownloaderApp(ctk.CTk):
                     after_files = set(os.listdir(self.save_dir))
                     if after_files - before_files:
                         self.update_progress_ui(1.0, "Photos downloaded successfully!", "#4CAF50")
-                        self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved to:\\n{self.save_dir}"))
+                        self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved to:\n{self.save_dir}"))
                         try:
                             os.startfile(self.save_dir)
                         except Exception:
@@ -529,7 +529,7 @@ class OrionDownloaderApp(ctk.CTk):
                 creationflags=CREATE_NO_WINDOW
             )
 
-            progress_re = re.compile(r'\\[download\\]\\s+(\\d+(?:\\.\\d+)?)%.*?(?:at\\s+(\\S+))?.*?(?:ETA\\s+(\\S+))?')
+            progress_re = re.compile(r'\[download\]\s+(\d+(?:\.\d+)?)%.*?(?:at\s+(\S+))?.*?(?:ETA\s+(\S+))?')
 
             for line in proc.stdout:
                 clean_line = line.strip()
@@ -560,19 +560,19 @@ class OrionDownloaderApp(ctk.CTk):
 
             if proc.returncode == 0:
                 self.update_progress_ui(1.0, "Download completed!", "#4CAF50")
-                self.after(0, lambda: messagebox.showinfo("Success", f"File saved to:\\n{self.save_dir}"))
+                self.after(0, lambda: messagebox.showinfo("Success", f"File saved to:\n{self.save_dir}"))
                 try:
                     os.startfile(self.save_dir)
                 except Exception:
                     pass
             else:
-                error_message = "\\n".join(error_lines) if error_lines else f"yt-dlp exited with code {proc.returncode}"
+                error_message = "\n".join(error_lines) if error_lines else f"yt-dlp exited with code {proc.returncode}"
                 err_str = error_message.lower()
 
                 if "no video" in err_str or "not a video" in err_str or ("instagram.com" in url and "/p/" in url):
                     if "instagram.com" in url and download_instagram_direct(url, self.save_dir):
                         self.update_progress_ui(1.0, "Photos downloaded successfully!", "#4CAF50")
-                        self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved directly to:\\n{self.save_dir}"))
+                        self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved directly to:\n{self.save_dir}"))
                         try:
                             os.startfile(self.save_dir)
                         except Exception:
@@ -580,10 +580,10 @@ class OrionDownloaderApp(ctk.CTk):
                         return
 
                 self.update_progress_ui(0.0, "Download failed", "#E5534B")
-                self.after(0, lambda: messagebox.showerror("Error", f"Failed to download media:\\n\\n{error_message}"))
+                self.after(0, lambda: messagebox.showerror("Error", f"Failed to download media:\n\n{error_message}"))
         except Exception as e:
             self.update_progress_ui(0.0, "Download failed", "#E5534B")
-            self.after(0, lambda: messagebox.showerror("Error", f"Failed to download media:\\n\\n{e}"))
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to download media:\n\n{e}"))
         finally:
             self.after(0, lambda: self.btn_download.configure(state="normal"))
 
@@ -591,7 +591,3 @@ class OrionDownloaderApp(ctk.CTk):
 if __name__ == "__main__":
     app = OrionDownloaderApp()
     app.mainloop()
-'''
-with open('orionmediadownloader_autoupdate.py', 'w', encoding='utf-8') as f:
-    f.write(code_content)
-print("Saved successfully.")
