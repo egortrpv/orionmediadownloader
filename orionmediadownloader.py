@@ -8,6 +8,12 @@ import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import yt_dlp
+import traceback
+
+try:
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+except ImportError:
+    ImpersonateTarget = None
 
 try:
     import gallery_dl
@@ -25,6 +31,36 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 
+class YdlLogger:
+    """Перехватывает внутренние ошибки и предупреждения yt-dlp."""
+    def __init__(self):
+        self.errors = []
+        self.warnings = []
+
+    def debug(self, msg):
+        pass
+
+    def warning(self, msg):
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', str(msg)).strip()
+        if clean:
+            self.warnings.append(clean)
+
+    def error(self, msg):
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', str(msg)).strip()
+        if clean:
+            self.errors.append(clean)
+
+    def get_error_text(self, exc: Exception) -> str:
+        if self.errors:
+            return "\n".join(self.errors)
+        exc_str = re.sub(r'\x1b\[[0-9;]*m', '', str(exc)).strip()
+        if exc_str:
+            return f"{type(exc).__name__}: {exc_str}"
+        if self.warnings:
+            return "\n".join(self.warnings[-3:])
+        return f"{type(exc).__name__} (empty message)"
+
+
 def download_instagram_direct(url: str, save_dir: str) -> bool:
     """Прямое скачивание фото из Instagram через публичные эндпоинты без необходимости авторизации."""
     match = re.search(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)', url)
@@ -32,14 +68,13 @@ def download_instagram_direct(url: str, save_dir: str) -> bool:
         return False
     shortcode = match.group(1)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.instagram.com/",
     }
 
     downloaded = 0
 
-    # 1. Попытка через публичный embed (поддерживает и одиночные фото, и карусели)
     embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
     try:
         req = urllib.request.Request(embed_url, headers=headers)
@@ -61,7 +96,6 @@ def download_instagram_direct(url: str, save_dir: str) -> bool:
     except Exception:
         pass
 
-    # 2. Запасной вариант через перенаправление /media/?size=l
     if downloaded == 0:
         media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
         try:
@@ -89,15 +123,21 @@ class OrionDownloaderApp(ctk.CTk):
 
         if getattr(sys, 'frozen', False):
             self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0])))
+            exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
         else:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
+            exe_dir = self.base_dir
 
-        icon_path = os.path.join(self.base_dir, "orion_logo_hd.ico")
-        if not os.path.exists(icon_path):
-            icon_path = os.path.join(self.base_dir, "orion_logo.ico")
-
-        if os.path.exists(icon_path):
-            self.after(200, lambda: self.iconbitmap(icon_path))
+        icon_candidates = [
+            os.path.join(self.base_dir, "orion_logo_hd.ico"),
+            os.path.join(exe_dir, "orion_logo_hd.ico"),
+            os.path.join(self.base_dir, "orion_logo.ico"),
+            os.path.join(exe_dir, "orion_logo.ico"),
+        ]
+        for candidate in icon_candidates:
+            if os.path.exists(candidate):
+                self.after(200, lambda p=candidate: self.iconbitmap(p))
+                break
 
         self.save_dir = os.path.join(os.path.expanduser("~"), "Downloads")
         self.info_dict = None
@@ -109,8 +149,8 @@ class OrionDownloaderApp(ctk.CTk):
         self.frame_url.pack(pady=(28, 6))
 
         self.entry_url = ctk.CTkEntry(
-            self.frame_url, 
-            width=435, 
+            self.frame_url,
+            width=435,
             placeholder_text="Paste media link here (Video or Photo)..."
         )
         self.entry_url.pack(side="left", padx=(0, 8))
@@ -123,31 +163,30 @@ class OrionDownloaderApp(ctk.CTk):
         )
         self.btn_paste.pack(side="left")
 
-        # Привязка ПКМ и горячих клавиш
         self._setup_entry_features()
 
         # Кнопка проверки
         self.btn_check = ctk.CTkButton(
-            self, 
-            text="Fetch Info", 
-            width=180, 
+            self,
+            text="Fetch Info",
+            width=180,
             command=self.start_fetch_info
         )
         self.btn_check.pack(pady=6)
 
         # Название медиа
         self.label_video_name = ctk.CTkLabel(
-            self, 
-            text="", 
-            wraplength=520, 
+            self,
+            text="",
+            wraplength=520,
             font=ctk.CTkFont(size=12)
         )
         self.label_video_name.pack(pady=4)
 
         # Выбор качества
         self.label_quality = ctk.CTkLabel(
-            self, 
-            text="Quality / Mode:", 
+            self,
+            text="Quality / Mode:",
             font=ctk.CTkFont(size=13, weight="bold")
         )
         self.label_quality.pack(pady=(6, 2))
@@ -171,29 +210,29 @@ class OrionDownloaderApp(ctk.CTk):
         self.frame_dir.pack(pady=8)
 
         self.btn_choose_dir = ctk.CTkButton(
-            self.frame_dir, 
-            text="Save Folder", 
-            width=120, 
+            self.frame_dir,
+            text="Save Folder",
+            width=120,
             command=self.choose_directory
         )
         self.btn_choose_dir.pack(side="left", padx=6)
 
         self.label_dir = ctk.CTkLabel(
-            self.frame_dir, 
-            text=self.save_dir, 
-            width=380, 
+            self.frame_dir,
+            text=self.save_dir,
+            width=380,
             anchor="w"
         )
         self.label_dir.pack(side="left", padx=6)
 
         # Кнопка скачивания
         self.btn_download = ctk.CTkButton(
-            self, 
-            text="Download", 
-            width=220, 
+            self,
+            text="Download",
+            width=220,
             height=36,
-            fg_color="#2EA043", 
-            hover_color="#238636", 
+            fg_color="#2EA043",
+            hover_color="#238636",
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self.start_download
         )
@@ -227,21 +266,16 @@ class OrionDownloaderApp(ctk.CTk):
             self.entry_url._entry.bind("<Button-3>", show_menu)
 
         def on_key(event):
-            # Проверка нажатия клавиши Ctrl
             if event.state & 4 or event.state & 0x20000:
-                # Keycode 86 = V (физическая клавиша на Windows, работает в RU и EN)
                 if event.keycode == 86:
                     self._paste_to_entry()
                     return "break"
-                # Keycode 67 = C
                 elif event.keycode == 67:
                     self._copy_from_entry()
                     return "break"
-                # Keycode 65 = A
                 elif event.keycode == 65:
                     self.entry_url.select_range(0, 'end')
                     return "break"
-                # Keycode 88 = X
                 elif event.keycode == 88:
                     self._cut_from_entry()
                     return "break"
@@ -307,21 +341,25 @@ class OrionDownloaderApp(ctk.CTk):
             self.progress_bar.set(progress_float)
         self.label_status.configure(text=status_text, text_color=color)
 
-    def _get_base_ydl_opts(self):
+    def _get_base_ydl_opts(self, logger: YdlLogger, url: str = ""):
         opts = {
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "no_color": True,
+            "logger": logger,
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://www.google.com/",
             }
         }
-        try:
-            import curl_cffi
-            opts["impersonate"] = "chrome"
-        except ImportError:
-            pass
+        # В актуальном yt-dlp требуется объект ImpersonateTarget.from_str("chrome"), а не строка
+        if "youtube.com" not in url and "youtu.be" not in url and ImpersonateTarget is not None:
+            try:
+                import curl_cffi
+                opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+            except Exception:
+                pass
         return opts
 
     def start_fetch_info(self):
@@ -337,8 +375,9 @@ class OrionDownloaderApp(ctk.CTk):
 
     def _fetch_info_thread(self, url: str):
         self.is_photo_post = False
+        logger = YdlLogger()
         try:
-            ydl_opts = self._get_base_ydl_opts()
+            ydl_opts = self._get_base_ydl_opts(logger, url)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 self.info_dict = ydl.extract_info(url, download=False)
                 title = self.info_dict.get("title", "Untitled")
@@ -347,7 +386,10 @@ class OrionDownloaderApp(ctk.CTk):
                 self.combo_quality.configure(state="normal")
                 self.set_status("Video found. Ready to download.", "#4CAF50")
         except Exception as e:
-            err_msg = str(e).lower()
+            traceback.print_exc()
+            error_message = logger.get_error_text(e)
+            err_msg = error_message.lower()
+
             if "no video" in err_msg or "not a video" in err_msg or ("instagram.com" in url and "/p/" in url):
                 self.is_photo_post = True
                 self.label_video_name.configure(text="📷 Photo Post detected (Images will be saved in original quality)")
@@ -355,7 +397,7 @@ class OrionDownloaderApp(ctk.CTk):
                 self.set_status("Photo post ready to download.", "#4CAF50")
             else:
                 self.set_status("Failed to fetch media info", "#E5534B")
-                messagebox.showerror("Error", f"Could not retrieve info from URL:\n{e}")
+                messagebox.showerror("Error", f"Could not retrieve info from URL:\n\n{error_message}")
         finally:
             self.btn_check.configure(state="normal")
 
@@ -397,8 +439,7 @@ class OrionDownloaderApp(ctk.CTk):
         # 1. Загрузка фото
         if self.is_photo_post:
             self.update_progress_ui(0.5, "Downloading photos...", "#58A6FF")
-            
-            # Прямой метод для Instagram без логина
+
             if "instagram.com" in url:
                 success = download_instagram_direct(url, self.save_dir)
                 if success:
@@ -411,7 +452,6 @@ class OrionDownloaderApp(ctk.CTk):
                     self.btn_download.configure(state="normal")
                     return
 
-            # Запасной метод gallery-dl (для VK, X и т.д.)
             if GALLERY_DL_AVAILABLE:
                 before_files = set(os.listdir(self.save_dir))
                 try:
@@ -453,7 +493,8 @@ class OrionDownloaderApp(ctk.CTk):
         if not os.path.exists(ffmpeg_local):
             ffmpeg_local = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "ffmpeg.exe")
 
-        ydl_opts = self._get_base_ydl_opts()
+        logger = YdlLogger()
+        ydl_opts = self._get_base_ydl_opts(logger, url)
         ydl_opts.update({
             "format": fmt,
             "outtmpl": os.path.join(self.save_dir, "%(title)s.%(ext)s"),
@@ -474,7 +515,10 @@ class OrionDownloaderApp(ctk.CTk):
             except Exception:
                 pass
         except Exception as e:
-            err_str = str(e).lower()
+            traceback.print_exc()
+            error_message = logger.get_error_text(e)
+            err_str = error_message.lower()
+
             if "no video" in err_str or "not a video" in err_str or ("instagram.com" in url and "/p/" in url):
                 if "instagram.com" in url and download_instagram_direct(url, self.save_dir):
                     self.update_progress_ui(1.0, "Photos downloaded successfully!", "#4CAF50")
@@ -486,7 +530,7 @@ class OrionDownloaderApp(ctk.CTk):
                     return
 
             self.update_progress_ui(0.0, "Download failed", "#E5534B")
-            messagebox.showerror("Error", f"Failed to download media:\n{e}")
+            messagebox.showerror("Error", f"Failed to download media:\n\n{error_message}")
         finally:
             self.btn_download.configure(state="normal")
 
