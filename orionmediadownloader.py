@@ -1,19 +1,14 @@
-import os
+code_content = '''import os
 import re
 import sys
+import json
 import time
 import threading
+import subprocess
 import urllib.request
 import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
-import yt_dlp
-import traceback
-
-try:
-    from yt_dlp.networking.impersonate import ImpersonateTarget
-except ImportError:
-    ImpersonateTarget = None
 
 try:
     import gallery_dl
@@ -30,40 +25,13 @@ except ImportError:
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-
-class YdlLogger:
-    """Перехватывает внутренние ошибки и предупреждения yt-dlp."""
-    def __init__(self):
-        self.errors = []
-        self.warnings = []
-
-    def debug(self, msg):
-        pass
-
-    def warning(self, msg):
-        clean = re.sub(r'\x1b\[[0-9;]*m', '', str(msg)).strip()
-        if clean:
-            self.warnings.append(clean)
-
-    def error(self, msg):
-        clean = re.sub(r'\x1b\[[0-9;]*m', '', str(msg)).strip()
-        if clean:
-            self.errors.append(clean)
-
-    def get_error_text(self, exc: Exception) -> str:
-        if self.errors:
-            return "\n".join(self.errors)
-        exc_str = re.sub(r'\x1b\[[0-9;]*m', '', str(exc)).strip()
-        if exc_str:
-            return f"{type(exc).__name__}: {exc_str}"
-        if self.warnings:
-            return "\n".join(self.warnings[-3:])
-        return f"{type(exc).__name__} (empty message)"
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+YTDLP_RELEASE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 
 
 def download_instagram_direct(url: str, save_dir: str) -> bool:
     """Прямое скачивание фото из Instagram через публичные эндпоинты без необходимости авторизации."""
-    match = re.search(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)', url)
+    match = re.search(r'instagram\\.com/(?:p|reel)/([A-Za-z0-9_-]+)', url)
     if not match:
         return False
     shortcode = match.group(1)
@@ -86,7 +54,7 @@ def download_instagram_direct(url: str, save_dir: str) -> bool:
 
             unique_urls = list(dict.fromkeys(img_urls))
             for idx, img_url in enumerate(unique_urls):
-                clean_url = img_url.replace('&amp;', '&').replace('\\u0026', '&')
+                clean_url = img_url.replace('&amp;', '&').replace('\\\\u0026', '&')
                 img_req = urllib.request.Request(clean_url, headers=headers)
                 suffix = f"_{idx+1}" if len(unique_urls) > 1 else ""
                 out_path = os.path.join(save_dir, f"instagram_{shortcode}{suffix}.jpg")
@@ -138,6 +106,13 @@ class OrionDownloaderApp(ctk.CTk):
             if os.path.exists(candidate):
                 self.after(200, lambda p=candidate: self.iconbitmap(p))
                 break
+
+        # Папка в AppData для хранения и автообновления yt-dlp.exe
+        app_data = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+        self.engine_dir = os.path.join(app_data, "OrionMediaDownloader")
+        os.makedirs(self.engine_dir, exist_ok=True)
+        self.ytdlp_exe = os.path.join(self.engine_dir, "yt-dlp.exe")
+        self.engine_ready = threading.Event()
 
         self.save_dir = os.path.join(os.path.expanduser("~"), "Downloads")
         self.info_dict = None
@@ -242,8 +217,60 @@ class OrionDownloaderApp(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(self, width=500, height=10)
 
         # Статус
-        self.label_status = ctk.CTkLabel(self, text="Ready", text_color="gray", wraplength=520)
+        self.label_status = ctk.CTkLabel(self, text="Checking engine...", text_color="#F1E05A", wraplength=520)
         self.label_status.pack(pady=(4, 10))
+
+        # Запуск фоновой проверки/обновления yt-dlp.exe
+        threading.Thread(target=self._init_and_update_engine, daemon=True).start()
+
+    def _init_and_update_engine(self):
+        """Скачивает yt-dlp.exe при первом запуске или обновляет его в фоне."""
+        try:
+            if not os.path.exists(self.ytdlp_exe):
+                self.after(0, lambda: self.btn_check.configure(state="disabled"))
+                self.after(0, lambda: self.btn_download.configure(state="disabled"))
+                self.after(0, lambda: self.set_status("First launch: downloading yt-dlp engine...", "#58A6FF"))
+                tmp_path = self.ytdlp_exe + ".tmp"
+                req = urllib.request.Request(
+                    YTDLP_RELEASE_URL,
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp, open(tmp_path, "wb") as out_f:
+                    out_f.write(resp.read())
+                os.replace(tmp_path, self.ytdlp_exe)
+                self.engine_ready.set()
+                self.after(0, lambda: self.btn_check.configure(state="normal"))
+                self.after(0, lambda: self.btn_download.configure(state="normal"))
+                self.after(0, lambda: self.set_status("Ready (Engine installed)", "#4CAF50"))
+            else:
+                # Файл уже есть — сразу разрешаем работу и тихо обновляем в фоне
+                self.engine_ready.set()
+                self.after(0, lambda: self.set_status("Updating engine in background...", "gray"))
+                subprocess.run(
+                    [self.ytdlp_exe, "-U"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=CREATE_NO_WINDOW,
+                    timeout=30
+                )
+                self.after(0, lambda: self._restore_ready_status())
+        except Exception as e:
+            if os.path.exists(self.ytdlp_exe):
+                self.engine_ready.set()
+                self.after(0, lambda: self.btn_check.configure(state="normal"))
+                self.after(0, lambda: self.btn_download.configure(state="normal"))
+                self.after(0, lambda: self.set_status("Ready (Offline mode)", "gray"))
+            else:
+                self.after(0, lambda: self.set_status("Failed to download yt-dlp engine", "#E5534B"))
+                self.after(0, lambda: messagebox.showerror(
+                    "Engine Error",
+                    f"Could not download yt-dlp.exe on first launch. Check your internet connection.\\n\\n{e}"
+                ))
+
+    def _restore_ready_status(self):
+        current = self.label_status.cget("text")
+        if "Updating engine" in current or "Checking engine" in current:
+            self.set_status("Ready", "gray")
 
     def _setup_entry_features(self):
         """Контекстное меню по ПКМ и поддержка горячих клавиш в любой раскладке."""
@@ -341,27 +368,6 @@ class OrionDownloaderApp(ctk.CTk):
             self.progress_bar.set(progress_float)
         self.label_status.configure(text=status_text, text_color=color)
 
-    def _get_base_ydl_opts(self, logger: YdlLogger, url: str = ""):
-        opts = {
-            "quiet": True,
-            "no_warnings": False,
-            "no_color": True,
-            "logger": logger,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.google.com/",
-            }
-        }
-        # В актуальном yt-dlp требуется объект ImpersonateTarget.from_str("chrome"), а не строка
-        if "youtube.com" not in url and "youtu.be" not in url and ImpersonateTarget is not None:
-            try:
-                import curl_cffi
-                opts["impersonate"] = ImpersonateTarget.from_str("chrome")
-            except Exception:
-                pass
-        return opts
-
     def start_fetch_info(self):
         url = self.entry_url.get().strip()
         if not url:
@@ -374,32 +380,53 @@ class OrionDownloaderApp(ctk.CTk):
         threading.Thread(target=self._fetch_info_thread, args=(url,), daemon=True).start()
 
     def _fetch_info_thread(self, url: str):
+        self.engine_ready.wait(timeout=60)
         self.is_photo_post = False
-        logger = YdlLogger()
         try:
-            ydl_opts = self._get_base_ydl_opts(logger, url)
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                self.info_dict = ydl.extract_info(url, download=False)
+            cmd = [
+                self.ytdlp_exe,
+                "--dump-json",
+                "--no-playlist",
+                "--no-warnings",
+                "--no-color",
+                url
+            ]
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=CREATE_NO_WINDOW
+            )
+
+            if proc.returncode == 0 and proc.stdout.strip():
+                first_line = proc.stdout.strip().splitlines()[0]
+                self.info_dict = json.loads(first_line)
                 title = self.info_dict.get("title", "Untitled")
                 display_title = f"{title[:75]}..." if len(title) > 75 else title
-                self.label_video_name.configure(text=f"🎬 {display_title}")
-                self.combo_quality.configure(state="normal")
-                self.set_status("Video found. Ready to download.", "#4CAF50")
-        except Exception as e:
-            traceback.print_exc()
-            error_message = logger.get_error_text(e)
-            err_msg = error_message.lower()
-
-            if "no video" in err_msg or "not a video" in err_msg or ("instagram.com" in url and "/p/" in url):
-                self.is_photo_post = True
-                self.label_video_name.configure(text="📷 Photo Post detected (Images will be saved in original quality)")
-                self.combo_quality.configure(state="disabled")
-                self.set_status("Photo post ready to download.", "#4CAF50")
+                self.after(0, lambda: self.label_video_name.configure(text=f"🎬 {display_title}"))
+                self.after(0, lambda: self.combo_quality.configure(state="normal"))
+                self.after(0, lambda: self.set_status("Video found. Ready to download.", "#4CAF50"))
             else:
-                self.set_status("Failed to fetch media info", "#E5534B")
-                messagebox.showerror("Error", f"Could not retrieve info from URL:\n\n{error_message}")
+                err_msg = proc.stderr.strip() or "Unknown error while fetching metadata"
+                err_lower = err_msg.lower()
+                if "no video" in err_lower or "not a video" in err_lower or ("instagram.com" in url and "/p/" in url):
+                    self.is_photo_post = True
+                    self.after(0, lambda: self.label_video_name.configure(
+                        text="📷 Photo Post detected (Images will be saved in original quality)"
+                    ))
+                    self.after(0, lambda: self.combo_quality.configure(state="disabled"))
+                    self.after(0, lambda: self.set_status("Photo post ready to download.", "#4CAF50"))
+                else:
+                    self.after(0, lambda: self.set_status("Failed to fetch media info", "#E5534B"))
+                    self.after(0, lambda: messagebox.showerror("Error", f"Could not retrieve info from URL:\\n\\n{err_msg}"))
+        except Exception as e:
+            self.after(0, lambda: self.set_status("Failed to fetch media info", "#E5534B"))
+            self.after(0, lambda: messagebox.showerror("Error", f"Could not retrieve info from URL:\\n\\n{e}"))
         finally:
-            self.btn_check.configure(state="normal")
+            self.after(0, lambda: self.btn_check.configure(state="normal"))
 
     def start_download(self):
         url = self.entry_url.get().strip()
@@ -412,30 +439,9 @@ class OrionDownloaderApp(ctk.CTk):
         self.set_status("Starting download...", "#F1E05A")
         threading.Thread(target=self._download_thread, args=(url,), daemon=True).start()
 
-    def _progress_hook(self, d):
-        if d['status'] == 'downloading':
-            now = time.time()
-            if now - self.last_ui_update < 0.15:
-                return
-            self.last_ui_update = now
-
-            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-            downloaded = d.get('downloaded_bytes') or 0
-            progress = (downloaded / total) if total > 0 else 0.0
-
-            raw_percent = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_percent_str', '')).strip()
-            raw_eta = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_eta_str', '')).strip()
-            raw_speed = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_speed_str', '')).strip()
-
-            eta_text = f" • ETA: {raw_eta}" if raw_eta else ""
-            speed_text = f" • {raw_speed}" if raw_speed else ""
-            status_text = f"Downloading: {raw_percent}{speed_text}{eta_text}"
-
-            self.update_progress_ui(progress, status_text, "#F1E05A")
-        elif d['status'] == 'finished':
-            self.update_progress_ui(1.0, "Processing & merging media (ffmpeg)...", "#58A6FF")
-
     def _download_thread(self, url: str):
+        self.engine_ready.wait(timeout=60)
+
         # 1. Загрузка фото
         if self.is_photo_post:
             self.update_progress_ui(0.5, "Downloading photos...", "#58A6FF")
@@ -444,12 +450,12 @@ class OrionDownloaderApp(ctk.CTk):
                 success = download_instagram_direct(url, self.save_dir)
                 if success:
                     self.update_progress_ui(1.0, "Instagram photos downloaded successfully!", "#4CAF50")
-                    messagebox.showinfo("Success", f"Photos saved directly to:\n{self.save_dir}")
+                    self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved directly to:\\n{self.save_dir}"))
                     try:
                         os.startfile(self.save_dir)
                     except Exception:
                         pass
-                    self.btn_download.configure(state="normal")
+                    self.after(0, lambda: self.btn_download.configure(state="normal"))
                     return
 
             if GALLERY_DL_AVAILABLE:
@@ -461,22 +467,22 @@ class OrionDownloaderApp(ctk.CTk):
                     after_files = set(os.listdir(self.save_dir))
                     if after_files - before_files:
                         self.update_progress_ui(1.0, "Photos downloaded successfully!", "#4CAF50")
-                        messagebox.showinfo("Success", f"Photos saved to:\n{self.save_dir}")
+                        self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved to:\\n{self.save_dir}"))
                         try:
                             os.startfile(self.save_dir)
                         except Exception:
                             pass
-                        self.btn_download.configure(state="normal")
+                        self.after(0, lambda: self.btn_download.configure(state="normal"))
                         return
                 except Exception:
                     pass
 
             self.update_progress_ui(0.0, "Photo download failed", "#E5534B")
-            messagebox.showerror("Error", "Could not download photos from this post.")
-            self.btn_download.configure(state="normal")
+            self.after(0, lambda: messagebox.showerror("Error", "Could not download photos from this post."))
+            self.after(0, lambda: self.btn_download.configure(state="normal"))
             return
 
-        # 2. Загрузка видео (yt-dlp)
+        # 2. Загрузка видео через внешний автообновляемый yt-dlp.exe
         quality_choice = self.combo_quality.get()
         if "1080p" in quality_choice:
             fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
@@ -493,48 +499,99 @@ class OrionDownloaderApp(ctk.CTk):
         if not os.path.exists(ffmpeg_local):
             ffmpeg_local = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "ffmpeg.exe")
 
-        logger = YdlLogger()
-        ydl_opts = self._get_base_ydl_opts(logger, url)
-        ydl_opts.update({
-            "format": fmt,
-            "outtmpl": os.path.join(self.save_dir, "%(title)s.%(ext)s"),
-            "merge_output_format": "mp4" if "Audio" not in quality_choice else None,
-            "progress_hooks": [self._progress_hook],
-        })
+        outtmpl = os.path.join(self.save_dir, "%(title)s.%(ext)s")
+        cmd = [
+            self.ytdlp_exe,
+            "-f", fmt,
+            "-o", outtmpl,
+            "--newline",
+            "--no-colors",
+            "--no-playlist",
+        ]
+
+        if "Audio" not in quality_choice:
+            cmd.extend(["--merge-output-format", "mp4"])
 
         if os.path.exists(ffmpeg_local):
-            ydl_opts["ffmpeg_location"] = ffmpeg_local
+            cmd.extend(["--ffmpeg-location", ffmpeg_local])
 
+        cmd.append(url)
+
+        error_lines = []
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            self.update_progress_ui(1.0, "Download completed!", "#4CAF50")
-            messagebox.showinfo("Success", f"File saved to:\n{self.save_dir}")
-            try:
-                os.startfile(self.save_dir)
-            except Exception:
-                pass
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=CREATE_NO_WINDOW
+            )
+
+            progress_re = re.compile(r'\\[download\\]\\s+(\\d+(?:\\.\\d+)?)%.*?(?:at\\s+(\\S+))?.*?(?:ETA\\s+(\\S+))?')
+
+            for line in proc.stdout:
+                clean_line = line.strip()
+                if not clean_line:
+                    continue
+
+                if "ERROR:" in clean_line:
+                    error_lines.append(clean_line)
+
+                match = progress_re.search(clean_line)
+                if match:
+                    now = time.time()
+                    if now - self.last_ui_update >= 0.15:
+                        self.last_ui_update = now
+                        pct_val = float(match.group(1))
+                        progress = min(pct_val / 100.0, 1.0)
+                        speed = match.group(2) or ""
+                        eta = match.group(3) or ""
+
+                        speed_text = f" • {speed}" if speed else ""
+                        eta_text = f" • ETA: {eta}" if eta else ""
+                        status_text = f"Downloading: {pct_val:.1f}%{speed_text}{eta_text}"
+                        self.update_progress_ui(progress, status_text, "#F1E05A")
+                elif clean_line.startswith("[Merger]") or clean_line.startswith("[ExtractAudio]") or clean_line.startswith("[Fixup"):
+                    self.update_progress_ui(1.0, "Processing & merging media (ffmpeg)...", "#58A6FF")
+
+            proc.wait()
+
+            if proc.returncode == 0:
+                self.update_progress_ui(1.0, "Download completed!", "#4CAF50")
+                self.after(0, lambda: messagebox.showinfo("Success", f"File saved to:\\n{self.save_dir}"))
+                try:
+                    os.startfile(self.save_dir)
+                except Exception:
+                    pass
+            else:
+                error_message = "\\n".join(error_lines) if error_lines else f"yt-dlp exited with code {proc.returncode}"
+                err_str = error_message.lower()
+
+                if "no video" in err_str or "not a video" in err_str or ("instagram.com" in url and "/p/" in url):
+                    if "instagram.com" in url and download_instagram_direct(url, self.save_dir):
+                        self.update_progress_ui(1.0, "Photos downloaded successfully!", "#4CAF50")
+                        self.after(0, lambda: messagebox.showinfo("Success", f"Photos saved directly to:\\n{self.save_dir}"))
+                        try:
+                            os.startfile(self.save_dir)
+                        except Exception:
+                            pass
+                        return
+
+                self.update_progress_ui(0.0, "Download failed", "#E5534B")
+                self.after(0, lambda: messagebox.showerror("Error", f"Failed to download media:\\n\\n{error_message}"))
         except Exception as e:
-            traceback.print_exc()
-            error_message = logger.get_error_text(e)
-            err_str = error_message.lower()
-
-            if "no video" in err_str or "not a video" in err_str or ("instagram.com" in url and "/p/" in url):
-                if "instagram.com" in url and download_instagram_direct(url, self.save_dir):
-                    self.update_progress_ui(1.0, "Photos downloaded successfully!", "#4CAF50")
-                    messagebox.showinfo("Success", f"Photos saved directly to:\n{self.save_dir}")
-                    try:
-                        os.startfile(self.save_dir)
-                    except Exception:
-                        pass
-                    return
-
             self.update_progress_ui(0.0, "Download failed", "#E5534B")
-            messagebox.showerror("Error", f"Failed to download media:\n\n{error_message}")
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to download media:\\n\\n{e}"))
         finally:
-            self.btn_download.configure(state="normal")
+            self.after(0, lambda: self.btn_download.configure(state="normal"))
 
 
 if __name__ == "__main__":
     app = OrionDownloaderApp()
     app.mainloop()
+'''
+with open('orionmediadownloader_autoupdate.py', 'w', encoding='utf-8') as f:
+    f.write(code_content)
+print("Saved successfully.")
